@@ -1,0 +1,1174 @@
+---
+title: "Simulations Glasgow network"
+author: "Pablo Bello"
+date: "3/28/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+
+
+```{r}
+library(RSiena)
+library(tidyverse)
+library(tictoc)
+library(pbapply)
+library(cowplot)
+library(igraph)
+library(intergraph)
+
+```
+
+
+```{r}
+########LOAD THE DATA
+load("~/Desktop/CSS/Social Network Analysis/SNA Labs/Simulations project/Data/Glasgow_data/Glasgow-friendship.RData")
+
+#---There are two tipes of friendship ties in the network (1 and 2) so I transform them into 1
+fr_1 <- ifelse (friendship.1 == 2 , 1 ,friendship.1)  
+fr_2 <- ifelse (friendship.2 == 2 , 1 ,friendship.2)
+```
+
+
+
+```{r}
+###########CREATING AN ARTIFICAL ADOPTION VARIABLE 
+#---Adoption variable
+set.seed(061295)
+p <- 0.2 #probability of a node starting as an adopter
+q <- 1-p
+s <- 160 #Number of nodes
+
+t1<- sample (sample(c(0,1),s, replace = TRUE, prob = c(q,p)))
+
+p <- 0.4 #----Probability of adoption in t2
+
+t2<- sapply(t1, function(x){
+  if (x == 0) {
+    sample(c(0,1), size = 1, replace = TRUE, prob = c(q,p))
+  }
+  else {
+    x <- 1
+  }
+})
+
+adoption <- as.matrix(bind_cols(t1 = t1, t2 = t2))
+
+sum(t1) #----Number of initial adopters
+sum(t2) #----Number of adopters in t2
+
+```
+
+
+
+
+```{r}
+########CREATE THE RSIENA DATA 
+data_sims <- sienaDataCreate(
+	friendship = sienaDependent(array(c(fr_1,fr_2), dim=c(dim(fr_1),2))),
+	adoption = sienaDependent(adoption,type="behavior", allowOnly = TRUE))
+
+
+###########CREATE THE MODEL FOR RSIENA
+###########TOTAL EXPOSURE MODEL
+#-----Model Specification
+model_sims <- getEffects(data_sims)
+model_sims <- includeEffects(model_sims, transTrip, transRecTrip)
+model_sims <- includeEffects(model_sims,totExposure, interaction1 = 'friendship' , name = 'adoption',type = 'rate')
+
+```
+
+```{r}
+#################ESTIMATION 
+#################TOTAL EXPOSURE MODEL
+estimation_options <-  sienaAlgorithmCreate(useStdInits = FALSE,projname ='results',seed=1234567, MaxDegre = c(friendship = 6))
+
+
+results_sims <- siena07(estimation_options, data = data_sims, effects = model_sims, useCluster = TRUE, nbrNodes = 4, returnDeps = TRUE)
+
+results_sims
+
+
+#-----Second estimation to get to a convergence value lower than .25
+results_sims <- siena07(estimation_options, data = data_sims, effects = model_sims, useCluster = TRUE, nbrNodes = 4, returnDeps = TRUE, prevAns = results_sims)
+
+results_sims
+
+```
+
+
+```{r}
+#########MANIPULATIONS 
+#########TOTAL EXPOSURE MODEL
+manip_totExp <- results_sims$theta[7]*-seq(-6,6,1)
+manip_totExp
+
+friend_rate <- 0.001 #----To mantain constant the friendship part of the model
+
+#---Manipulated models for totExposure---#
+models_totExp <- rep(list(results_sims),length(manip_totExp))
+models_totExp <- lapply(1:length(manip_totExp),function(i){
+	m <- models_totExp[[i]]
+	m$theta[[7]] <- manip_totExp[i]   
+	m$theta[[1]] <- friend_rate
+	return(m)
+})
+
+```
+
+```{r}
+ #######SIMULATIONS
+ #######TOTAL EXPOSURE MODEL
+N <- 100 #Number of simulated networks
+
+# simulate N networks under each condition:
+simulation_options <- sienaAlgorithmCreate(useStdInits=FALSE,
+	projname='results',cond=FALSE,seed=1234567,
+	nsub=0,n3=N)
+
+
+tic ("Simulations")
+calsims_tot <- lapply(models_totExp,function(m){
+	siena07(simulation_options,
+	data=data_sims,effects=model_sims,
+	prevAns=m,returnDeps=TRUE, useCluster = TRUE , nbrNodes = 4)
+})
+toc()
+
+```
+
+
+```{r}
+#########DIFFUSION ON THE SIMULATED NETWORKS
+#########TOTAL EXPOSURE MODEL
+
+#-----Number of ones on each simulated network with totSim
+gof_manipulated_tot <- lapply(calsims_tot, function(x){
+  sienaGOF(x,BehaviorDistribution,
+	verbose=TRUE,join=TRUE,varName="adoption")
+}) 
+
+
+ones_manipulated_tot <- lapply (gof_manipulated_tot, function(x){
+  x$Joint$Simulations[,2] - x$Joint$Simulations[,1]
+})
+
+#-----MEAN NUMBER OF ADOPTIONS FOR EACH MANIPULATION
+mean_ones_tot <- unlist (lapply (gof_manipulated_tot, function(x){mean (
+  x$Joint$Simulations[,2] - x$Joint$Simulations[,1])
+  
+}))
+
+mean_ones_tot 
+
+##########VIOLIN PLOT
+########## TOTAL EXPOSURE MODEL 
+
+df_tot <- do.call(cbind, ones_manipulated_tot)
+
+df_tot%>% 
+  as_tibble ()%>% 
+  pivot_longer(cols = 1:ncol(df_tot),names_to = "Model", values_to = "Adopters") %>% 
+  mutate (Model = as_factor(Model))%>% 
+  ggplot (aes ( Model, Adopters)) +
+  geom_violin(aes(color = Model ),trim = TRUE,alpha = 0.5, show.legend = FALSE) +
+  geom_boxplot(aes (color = Model) , width = 0.2, show.legend = FALSE) +
+  labs (title = "Diffusion process on the Total Exposure model",
+       x = "Threshold for adoption",
+       y = "Number of adopters")
+  
+
+```
+
+
+```{r}
+#########AVERAGE EXPOSURE MODEL
+
+######### DEFINING THE MODEL
+model_sims_av <- setEffect(model_sims ,totExposure,interaction1="friendship",name="adoption",type = "rate", include = FALSE)
+model_sims_av <- includeEffects(model_sims_av, avExposure, interaction1 = "friendship", name = "adoption", type = "rate")
+
+model_sims_av
+
+########ESTIMATION 
+tic("estimation")
+results_sims_av <- siena07(estimation_options, data = data_sims, effects = model_sims_av, useCluster = TRUE , nbrNodes = 4, returnDeps = TRUE)
+toc()
+
+results_sims_av
+```
+
+
+
+```{r}
+###########MANIPULATIONS FOR THE AVERAGE EXPOSURE MODEL
+
+manip_avExp <-  results_sims_av$theta[7] * -seq (-6,4,1)
+manip_avExp
+
+friend_rate <- 0.001
+#---Manipulated models for avExposure---#
+models_avExp <- rep(list(results_sims_av),length(manip_avExp))
+models_avExp <- lapply(1:length(manip_avExp),function(i){
+	m <- models_avExp[[i]]
+	m$theta[[7]] <- manip_avExp[i]
+	m$theta[[1]] <- friend_rate
+	return(m)
+})
+
+```
+
+```{r}
+############SIMULATIONS
+############AVERAGE EXPOSURE MODEL
+
+N <- 100 #Number of simulated networks
+
+# simulate N networks under each condition:
+simulation_options <- sienaAlgorithmCreate(useStdInits=FALSE,
+	projname='results',cond=FALSE,seed=1234567,
+	nsub=0,n3=N)
+
+
+tic("Simulations")
+calsims_av <- lapply(models_avExp,function(m){
+	siena07(simulation_options,
+	data=data_sims,effects=model_sims_av,
+	prevAns=m,returnDeps=TRUE, useCluster = TRUE , nbrNodes = 4)
+})
+toc ()
+
+```
+
+
+```{r}
+#########DIFFUSION ON THE SIMULATED NETWORKS
+#########AVERAGE EXPOSURE MODEL
+
+#-----Number of ones on each simulated network with totSim
+gof_manipulated_av <- lapply(calsims_av, function(x){
+  sienaGOF(x,BehaviorDistribution,
+	verbose=TRUE,join=TRUE,varName="adoption")
+}) 
+
+
+ones_manipulated_av <- lapply (gof_manipulated_av, function(x){
+  x$Joint$Simulations[,2] - x$Joint$Simulations[,1]
+})
+
+
+mean_ones_av <- unlist (lapply (gof_manipulated_av, function(x){mean (
+  x$Joint$Simulations[,2] - x$Joint$Simulations[,1])
+  
+}))
+
+mean_ones_av
+
+
+#----Violin Plot
+df_av <- do.call(cbind, ones_manipulated_av)
+
+df_av%>% 
+  as_tibble ()%>% 
+  pivot_longer(cols = 1:ncol(df_av),names_to = "Model", values_to = "Adopters") %>% 
+  mutate (Model = as_factor(Model))%>% 
+  ggplot (aes ( Model, Adopters)) +
+  geom_violin(aes(color = Model ),trim = TRUE,alpha = 0.5, show.legend = FALSE) +
+  geom_boxplot(aes (color = Model) , width = 0.2, show.legend = FALSE) +
+  labs (title = "Diffusion process on the Average Exposure model",
+       x = "Threshold for adoption",
+       y = "Number of adopters")
+
+
+```
+
+
+```{r}
+########MODEL COMPARISON
+#----A combination of the two previous violin plots plus two lines that conect the mean number of adopters for each manipulation and model. 
+
+mean_adoption <- t(rbind (mean_ones_av ,mean_ones_tot)) %>% 
+  as_tibble () %>% 
+  pivot_longer (cols = 1:2, names_to = "Effect",values_to = "Mean Adoption")
+
+
+df_both <- 
+  bind_rows(tot = as_tibble(df_tot) , av = as_tibble(df_av), .id = "Effect") %>%
+  as_tibble() 
+
+df_both %>% 
+  pivot_longer(cols = 2:length(df_both) ,names_to = "Model", values_to = "Adopters") %>% 
+  mutate (Model = as_factor(Model)) %>% 
+
+  ggplot (aes (Model, Adopters, fil = Effect)) +
+  geom_violin(aes(color = Effect),position = position_dodge(0.8),trim = TRUE,alpha = 0.5, show.legend = FALSE) +
+  geom_boxplot(aes (color = Effect) ,position = position_dodge(0.8), width = 0.2, show.legend = TRUE)+
+  stat_summary(fun.y=mean, geom="line", aes(group=Effect, color =Effect)) +
+  labs (title = "Figure 1. Simulated diffusion process on the Glasgow network",
+       x = "Threshold for adoption",
+       y = "Number of adopters") +
+  theme (text = element_text (family = 'Times'))
+ 
+```
+
+
+#################---REPLICATION PROCESS---################
+
+```{r, eval = FALSE}
+##########REPLICATIONS
+#######TOTAL EXPOSURE MODEL
+
+#Each iteration permutates the position of the initial adopters and then simulates the networks again
+tic("replications")
+rep_totExp <- pbreplicate (100,{
+set.seed(Sys.time())
+t1 <- sample(t1)
+t2 <- sample(t2)
+adoption <- as.matrix(bind_cols(t1 = t1, t2 = t2))
+
+data_sims_permut <- sienaDataCreate(
+	friendship = sienaDependent(array(c(fr_1,fr_2), dim=c(dim(fr_1),2))),
+	adoption = sienaDependent(adoption,type="behavior", allowOnly = TRUE)
+)
+calsims_tot_permut <- lapply(models_totExp,function(m){
+	siena07(simulation_options,
+	data=data_sims_permut,effects=model_sims,
+	prevAns=m,returnDeps=TRUE, useCluster = TRUE, nbrNodes = 4)
+})
+
+gof_manipulated_tot_p <- lapply(calsims_tot_permut, function(x){
+  sienaGOF(x,BehaviorDistribution,
+	verbose=TRUE,join=TRUE,varName="adoption")
+}) 
+ones_manipulated_tot_p <- lapply (gof_manipulated_tot_p, function(x){
+  x$Joint$Simulations[,2] - x$Joint$Simulations[,1]
+})
+
+means<- unlist(lapply (gof_manipulated_tot_p, function(x){mean (
+  x$Joint$Simulations[,2] - x$Joint$Simulations[,1])
+  
+})) 
+return(means)
+})
+toc()
+
+
+```
+
+
+
+```{r, eval = FALSE}
+#######REPLICATIONS
+#######AVERAGE EXPOSURE MODEL
+tic("replications")
+rep_avExp <- pbreplicate (100,{
+set.seed(Sys.time())
+t1 <- sample(t1)
+t2 <- sample(t2)
+adoption <- as.matrix(bind_cols(t1 = t1, t2 = t2))
+
+data_sims_permut <- sienaDataCreate(
+	friendship = sienaDependent(array(c(fr_1,fr_2), dim=c(dim(fr_1),2))),
+	adoption = sienaDependent(adoption,type="behavior", allowOnly = TRUE)
+)
+calsims_av_permut <- lapply(models_avExp,function(m){
+	siena07(simulation_options,
+	data=data_sims_permut,effects=model_sims_av,
+	prevAns=m,returnDeps=TRUE, useCluster = TRUE, nbrNodes = 4)
+})
+
+gof_manipulated_av_p <- lapply(calsims_av_permut, function(x){
+  sienaGOF(x,BehaviorDistribution,
+	verbose=TRUE,join=TRUE,varName="adoption")
+}) 
+ones_manipulated_av_p <- lapply (gof_manipulated_av_p, function(x){
+  x$Joint$Simulations[,2] - x$Joint$Simulations[,1]
+})
+
+means<- unlist(lapply (gof_manipulated_av_p, function(x){mean (
+  x$Joint$Simulations[,2] - x$Joint$Simulations[,1])
+  
+})) 
+return(means)
+})
+toc()
+```
+
+```{r , eval = FALSE}
+###########GRAPH FOR THE REPLICATIONS 
+
+rep_avExp <- as_tibble(t(rep_avExp))
+rep_totExp <- as_tibble(t(rep_totExp))
+  
+means_rep_avExp <- apply (rep_avExp, MARGIN = 2 , FUN = function (x) mean (x))
+means_rep_totExp <- apply (rep_totExp, MARGIN = 2 , FUN = function (x) mean (x))
+
+bind_rows(av = means_rep_avExp,tot = means_rep_totExp, .id = 'effect') %>% 
+  pivot_longer(cols = 1:length(manip_totExp)+1,names_to = 'model',values_to = 'value') %>%  
+  mutate( model = as_factor(model)) %>% 
+  ggplot (aes(model, value, group = effect, color = effect)) +
+  geom_line () +
+  geom_point () +
+  labs (title = "Figure 4. Simulated diffusion process on the Glasgow network (Replications)",
+       x = "Threshold for adoption",
+       y = "Number of adopters") +
+  theme (text = element_text (family = 'Times'))
+  
+```
+
+
+
+#################---ADOPTION STATUS BY DEGREE OF THE NODES---#################
+In this section if nodes' degree is related to adoption or not. For that, I extract representative networks for each model and manipulation. I define representative networks as those simulated networks that whose number of adopters is equal to the mean number of adopters for all the simulated networks for a particular  manipulation of the exposure effects. I use the simulations for the original models, not the iterations. 
+
+```{r}
+##########EXTRACT THE SIMULATED NETWORKS
+#---Christian's function to extract the simulated networks as an adjacency matrix
+extract <- function(sienaresults,nsim,results) {
+# function extracts RSiena-simulated network as adjacency matrix;
+# does not work for networks with other names that 'friendship',
+#               for groups other than the first in multi-group data,
+#               for periods other than the first in multi-period data.
+	
+	# extract desired simulated edgelist
+	simnet <- sienaresults$sims[[nsim]]$Data1$friendship$`1`
+
+	# reconstruct size of network (not explicitly given in results object):
+	ncells <- attr(results$f,'numberNonMissingNetwork')+
+		attr(results$f,'numberMissingNetwork')
+	n <- (1+sqrt(4*ncells+1))/2
+	
+	# make empty matrix of apropriate size:
+	mat <- matrix(0,nr=n,nc=n)
+
+	# put edgelist values where appropriate:
+	for (r in 1:nrow(simnet)) {
+		mat[simnet[r,1],simnet[r,2]] <- simnet[r,3]
+	}
+	
+	# hand back extracted matrix:
+	return(mat)
+} 
+
+
+```
+
+```{r}
+library (sna)
+##########EXTRACT REPRESENTATIVE NETWORKS FOR EACH MANIPULATION
+########## TOTAL EXPOSURE MANIPULATIONS
+#----Extract the representative simulated networks----#
+representative_networks <- function (x, model_n){
+  beh <- sum(calsims_tot[[model_n]]$sims[[x]]$Data1$adoption$`1`) #adoption vector
+  mean <- round (mean(gof_manipulated_tot[[model_n]]$Joint$Simulations[,2] - gof_manipulated_tot[[model_n]]$Joint$Simulations[,1]),0) #mean adoption over the simulations for this model
+  if(beh == mean){  #if the network is representative then make it a sna object and return it 
+  net <- network(extract(sienaresults = calsims_tot[[model_n]],nsim = x,results = results_sims))
+  dep <- calsims_tot[[model_n]]$sims[[x]]$Data1$adoption$`1`
+  net %v% "dep" <- dep
+  return(net)
+  }
+}
+
+#---Get the first representative network for each manipulated model
+networks_X <- lapply (1:length(models_totExp), function (i){
+  list <- Filter(Negate(is.null), #---Filter out non-representative networks (NULLs)
+  lapply(1:N,function(x) { 
+  representative_networks(x, model_n = i)
+}))
+  return(list[[1]])})
+
+
+```
+
+```{r}
+#######ADOPTIONSTATUS AT THE END OF THE PERIOD BY DEGREE OF THE NODE 
+#######TOTAL EXPOSURE MANIPULATIONS
+
+########DENSITY PLOTS
+dens_plots <- lapply (networks_X , function (x) {
+graph <- asIgraph(x)
+adopt <- vertex_attr(graph, "dep")
+deg <- igraph::degree(graph)
+
+return (bind_cols (adoption = adopt, degree = deg)  %>% 
+  as_tibble () %>% 
+  mutate (Adoption = fct_rev(factor(adoption))) %>% 
+  ggplot (aes (degree , group = adoption))+
+  geom_density (aes (fill = Adoption, color = Adoption), alpha = 0.5) +
+  labs (x = "",
+        y = "") +
+    guides (color = FALSE ,fill = FALSE)
+    ) 
+})
+
+
+dens_plots_tot <- plot_grid(plotlist = dens_plots, 
+          labels = 'auto',
+          label_size = 11,
+          label_fontfamily = 'Times',
+          nrow = 7,
+          align = 'hv',
+          axis = 'tblr')
+
+#---Add a title to the grid of plots
+title_tot <- ggdraw() + 
+  draw_label(
+    "Figure 5. Density plots for the total exposure model",
+    fontfamily = 'Times',
+    size = 12,
+    x = 0,
+    hjust = 0
+  ) +
+  theme(
+    # add margin on the left of the drawing canvas,
+    # so title is aligned with left edge of first plot
+    plot.margin = margin(0, 0, 0, 7)
+  )
+
+#----Final plot
+plot_grid(
+  title_tot, dens_plots_tot,
+  ncol = 1,
+  # rel_heights values control vertical title margins
+  rel_heights = c(0.1, 1)
+)
+
+##---- A selection of density plots to present them in the paper
+labels_alpha <- c("V1","V6","V9","V10","V11","V13")
+alpha <- plot_grid(plotlist = dens_plots[c(1,6,9,10,11,13)], 
+          labels = labels_alpha,
+          label_size = 11,
+          label_fontfamily = 'Times',
+          nrow = 3,
+          align = 'hv',
+          axis = 'tblr')
+
+#---Alpha plot with title
+plot_grid(
+  title_tot,alpha,
+  ncol = 1,
+  # rel_heights values control vertical title margins
+  rel_heights = c(0.1, 1)
+)
+
+```
+
+```{r}
+########BAR PLOTS FOR THE TOTAL EXPOSURE MANIPULATIONS
+bar_plots <- lapply (networks_X , function (x) {
+graph <- asIgraph(x)
+adopt <- vertex_attr(graph, "dep")
+deg <- igraph::degree(graph)
+
+return (bind_cols (adoption = adopt,degree = deg)  %>% 
+  as_tibble () %>% 
+ mutate (Adoption = fct_rev(factor(adoption))) %>% 
+  ggplot (aes (degree , group = adoption))+
+  geom_bar (aes (fill = Adoption, color = Adoption), position = position_dodge2(padding = 0.5))
+)
+})
+
+plot_grid(plotlist = bar_plots, 
+          labels = 'auto',
+          nrow = 5,
+          align = 'hv',
+          axis = 'tblr')
+
+```
+
+
+```{r}
+#######ADOPTION STATUS AT THE END OF THE PERIOD BY DEGREE OF THE NODE 
+####### AVERAGE EXPOSURE MANIPULATIONS
+
+#----Extract the representative simulated networks----#
+representative_networks_av <- function (x, model_n){
+  beh <- sum(calsims_av[[model_n]]$sims[[x]]$Data1$adoption$`1`) #adoption vector
+  mean <- round (mean(gof_manipulated_av[[model_n]]$Joint$Simulations[,2] - gof_manipulated_av[[model_n]]$Joint$Simulations[,1]),0) #mean adoption over the simulations for this model
+  if(beh == mean){  #if the network is representative then make it a sna object and return it 
+  net <- network(extract(sienaresults = calsims_av[[model_n]],nsim = x,results = results_sims_av))
+  dep <- calsims_av[[model_n]]$sims[[x]]$Data1$adoption$`1`
+  net %v% "dep" <- dep
+  return(net)
+  }
+}
+
+
+######EXTRACT FIRST REPRESENTATIVE NETWORK FOR EACH MANIPULATION
+networks_Y <- lapply (1:length(models_avExp), function (i){
+  list <- Filter(Negate(is.null), #---Filter out non-representative networks (NULLs)
+  lapply(1:N,function(x) { 
+  representative_networks_av(x, model_n = i)
+}))
+  return(list[[1]])})
+
+```
+
+```{r}
+######DENSITY PLOTS FOR AVERAGE EXPOSURE MANIPULATIONS
+#This density plots compare the degree of adopters versus non-adopters
+
+dens_plots_av <- lapply (networks_Y , function (x) {
+graph <- asIgraph(x)
+adopt <- vertex_attr(graph, "dep")
+deg <- igraph::degree(graph)
+
+return (bind_cols (adoption = adopt,degree = deg)  %>% 
+  as_tibble () %>% 
+  mutate (Adoption = fct_rev(factor(adoption))) %>% 
+  ggplot (aes (degree , group = adoption))+
+  geom_density (aes (fill = Adoption, color = Adoption), alpha = 0.5) +
+    labs (x = "",
+        y = "") +
+    guides (color = FALSE ,fill = FALSE)
+    ) 
+})
+
+dens_plots_av_grid <- plot_grid(plotlist = dens_plots_av, 
+          labels = 'auto',
+          nrow = 6,
+          label_size = 11,
+          label_fontfamily = 'Times',
+          align = 'hv',
+          axis = 'tblr')
+
+#---Add a title to the grid of plots
+title_av <- ggdraw() + 
+  draw_label(
+    "Figure 6. Density plots for the average exposure model",
+   fontfamily = 'Times',
+    size = 12,
+    x = 0,
+    hjust = 0
+  ) +
+  theme(
+    # add margin on the left of the drawing canvas,
+    # so title is aligned with left edge of first plot
+    plot.margin = margin(0, 0, 0, 7)
+  )
+
+#----Final plot
+plot_grid(
+  title_av, dens_plots_av_grid,
+  ncol = 1,
+  # rel_heights values control vertical title margins
+  rel_heights = c(0.1, 1)
+)
+
+#---Selection of density plots presented in the paper
+labs_beta <- c("V1","V6","V9","V10","V11")
+beta <- plot_grid (plotlist = dens_plots_av[c(1,6,9,10,11)],
+          labels = labs_beta,
+          nrow = 3,
+          label_size = 11,
+          label_fontfamily = 'Times',
+          align = 'hv',
+          axis = 'tblr')
+#----Final plot
+plot_grid(
+  title_av, beta,
+  ncol = 1,
+  # rel_heights values control vertical title margins
+  rel_heights = c(0.1, 1)
+)
+
+```
+
+```{r}
+#########BAR PLOTS FOR THE AVERAGE EXPOSURE MODEL
+bar_plots_av <- lapply (networks_Y , function (x) {
+graph <- asIgraph(x)
+adopt <- vertex_attr(graph, "dep")
+deg <- igraph::degree(graph, mode = 'out')
+
+return (bind_cols (adoption = adopt,outdegree = deg)  %>% 
+  as_tibble () %>% 
+  mutate (Adoption = fct_rev(factor(adoption))) %>% 
+  ggplot (aes (outdegree , group = adoption))+
+  geom_bar(aes (fill = Adoption, color = Adoption), position = position_dodge2(padding = 0.5)) 
+)
+})
+
+plot_grid(plotlist = bar_plots_av ,
+          labels = 'auto',
+          nrow = 5,
+          align = 'hv',
+          axis = 'tblr')
+
+
+```
+
+
+
+
+
+Why avExposure is more effective than totExposure in spreading innovation in the network?
+Lets suppose that we have a network with mean degree = 10. If we estimate initial parameters for avExposure and totExposure in this case they would differ by a factor of 10. Imagine then that we estimate the "thresholds" as 0.2 for avExposure and 2 for totExposure (the logit coefficients would be inverse, the totExposure coefficient is always smaller than the avExposure coefficient). 
+
+In this situation, nodes that have an outdegree smaller than the mean get more easily inffected in the avExposre case than in the totExposure case. For instance, a node with degree 4 would need only 1 infected friend (which is 0.25 of his friends) to get infected in the avExp case, but 2 in the totExp case. The opposite happens when a node has a bigger than average outdegree. Imagine a node with degree 20. For him, 2 infected friends would be enough in the totExposure condition to get infected while in the avExp it would need 4 (0.20% of his friends). 
+
+If the degree distribution is skewed to the right, there are more nodes with degree lower than the mean than nodes with degree higher than the mean. The opposite holds if the distribution is skewed distributions the avExp model of diffusion has advantage over the totExposure model. 
+
+This conditions only hold when the contagion is complex (threshold higher than 1). Otherwise, the totExposure model has always advantage over the avExposure model in spreading sth over the network. 
+
+
+
+```{r}
+######DEGREE DISTRIBUTION OF THE ACTUAL NETWORK
+
+list_net <- list(fr_1, fr_2) 
+
+######CLEAN THE NETWORKS
+for ( i in 1:2) {
+present <- rowSums(list_net[[i]]) != nrow(list_net[[i]])*10  #---Which nodes where present in that wave of the study
+network <- list_net[[i]]                                       #---Defining a floating network 
+list_net[[i]]<- network[present, present]                       #---Define the outer network without 10s
+na_row <- rowSums(is.na(list_net[[i]])) != ncol(list_net[[i]]) #---Rows without NAs
+na_col <- colSums(is.na(list_net[[i]])) != nrow(list_net[[i]])  #---- Columns without NAs
+network_2 <- list_net[[i]]                                        #---Another floating network (for subsetting in the following step)
+list_net[[i]] <- network_2 [na_row , na_col]  #---Network without NAs
+}
+
+#####TOTAL DEGREE OF THE NETWORK
+summary(sna::degree(network(list_net[[1]])))
+
+#######TOTAL DEGREE DISTRIBUTION
+dfg  <-sna::degree(network(list_net[[1]]))
+dfg <- as_tibble(dfg)
+ggplot(dfg,aes (value)) +
+  geom_density() +
+  geom_vline(xintercept = mean (dfg$value) ,color = 'red') +
+  geom_vline(xintercept = median(dfg$value), color = 'blue')
+
+
+
+######MEAN DEGREE OF THE INFECTED NODES
+rownames <- row.names(list_net[[2]]) #---Ids of the nodes present at time [i]
+rownames <- str_replace_all(rownames , "s", "")
+rownames <- as.numeric (rownames)
+
+adoption <- as_tibble(t2) [c (rownames),] #---Subset of nodes present from the fem vector
+net <- network (list_net[[2]]) 
+graph <- asIgraph(net) #----Direct transformation in graph object does not work
+set_vertex_attr(graph, name = 'adoption', value = adoption) #---Set adoption as vetex attribute
+deg <- igraph::degree(graph)#---Extract degree for each node
+
+
+#---Mean degree by adoption status at time 2
+mean_by_status <- bind_cols (adoption = adoption, degree = deg) %>% 
+  group_by(value) %>% 
+  summarise(mean = mean (degree))
+
+#--- Degree distribution by adoption status
+bind_cols (adoption = adoption, degree = deg) %>% 
+  ggplot (aes (degree , group = value))+
+  geom_density (aes (fill = fct_rev(factor(value)), color = fct_rev(factor(value))), alpha = 0.5) +
+  geom_vline (xintercept =  mean_by_status$mean[2], color = 'red') #---Mean degree for adopters
+    
+
+
+results_sims_av$theta[[7]]/results_sims$theta[[7]]
+
+```
+
+
+####################---GOODNESS OF FIT---###############################
+The results should be the same for both models, since the friendship part is equivalent so I'll only asses the GOF for one of them.
+
+```{r}
+########TOTAL EXPOSURE MODEL
+
+#########DEGREE DISTRIBUTION
+##---GOF For the indegree distribution 
+gof1_indegrees <- sienaGOF(results_sims,IndegreeDistribution,
+                           varName = "friendship",cumulative = FALSE)
+plot(gof1_indegrees) 
+
+##---GOF For the outdegree distribution
+gof1_outdegrees<- sienaGOF(results_sims,OutdegreeDistribution,
+                           varName = "friendship",cumulative = FALSE)
+plot(gof1_outdegrees) 
+
+```
+
+
+
+```{r, include = FALSE}
+##########GOF FOR TRIAD CENSUS
+gof1_triads <- sienaGOF(results_sims,TriadCensus,varName = "friendship")
+plot(gof1_triads,center = TRUE,scale = TRUE)
+```
+
+
+
+```{r, include = FALSE}
+#######GOF GEODESIC DISTANCES
+GeodesicDistribution <- function(i, data, sims, period, groupName,
+	varName, levls = c(1:5,Inf), cumulative= TRUE, ...) {
+    x <- networkExtraction(i, data, sims, period, groupName, varName)
+    require(sna)
+    a <- sna::geodist(symmetrize(x))$gdist
+    if (cumulative)
+    {
+        gdi <- sapply(levls, function(i){ sum(a <= i) })
+    }
+    else
+    {
+        gdi <- sapply(levls, function(i){ sum(a == i) })
+    }
+    names(gdi) <- as.character(levls)
+    return(gdi)
+}
+
+gof1_geodesic <- sienaGOF(results_sims,GeodesicDistribution,
+                           varName = "friendship",cumulative = FALSE)
+plot(gof1_geodesic) 
+
+```
+
+
+```{r, include = FALSE}
+###############GOF FOR ADOPTION 
+
+gof1_adoption <- sienaGOF(results_sims,BehaviorDistribution,
+	verbose=TRUE,join=TRUE,varName="adoption")
+
+plot(gof1_adoption)
+```
+
+
+
+############---NETWORK VISUALIZATION---####################
+I generate a graph for one representative network of each manipulation and both models
+
+
+```{r}
+##########VISUALIZATIONS
+##########TOTAL EXPOSURE MODEL
+library(sna)
+library(GGally)
+
+#----Apply the representive_networks () function to each model
+ plots <- lapply (1:length(models_totExp), function (i){
+  list <- Filter(Negate(is.null), #---Filter out non-representative networks (NULLs)
+  lapply(1:N,function(x) { 
+  representative_networks(x, model_n = i)
+}))
+   return(ggnet2 (list[[1]], color = "dep",
+        size = 0.75, 
+        palette = "Set2", directed = TRUE, 
+        arrow.size = 1,
+        arrow.gap = 0.025,
+        edge.alpha = 0.3) +
+          guides (color = FALSE))
+  })
+  
+#---Plot one representative network for each model
+labs_a <- c ("V1","V2","V3","V4","V5","V6","V7","V8","V9","V10","V11","V12","V13")
+net_tot_grid <- plot_grid(plotlist = plots, 
+          labels = labs_a,
+          label_size = 11,
+          label_fontfamily = 'Times',
+          nrow = 3,
+          align = 'hv',
+          axis = 'tblr')
+#---Add a title to the grid of plots
+title <- ggdraw() + 
+  draw_label(
+    "Figure 3. Simulated Networks. Total Exposure Model",
+    fontfamily = 'Times',
+    size = 12,
+    x = 0,
+    hjust = 0
+  ) +
+  theme(
+    # add margin on the left of the drawing canvas,
+    # so title is aligned with left edge of first plot
+    plot.margin = margin(0, 0, 0, 7)
+  )
+
+#----Final plot
+a <- plot_grid(
+  title, net_tot_grid,
+  ncol = 1,
+  # rel_heights values control vertical title margins
+  rel_heights = c(0.1, 1)
+)
+
+a
+```
+
+```{r}
+##########VISUALIZATIONS
+##########AVERAGE EXPOSURE MODEL
+
+#----Apply the representive_networks () function to each model
+ plots_av <- lapply (1:length(models_avExp), function (i){
+  list <- Filter(Negate(is.null), #---Filter out non-representative networks (NULLs)
+  lapply(1:N,function(x) { 
+  representative_networks_av(x, model_n = i)
+}))
+   return(ggnet2 (list[[1]], color = "dep",
+        size = 0.75, 
+        palette = "Set2", directed = TRUE, 
+        arrow.size = 1,
+        arrow.gap = 0.025,
+        edge.alpha = 0.3) +
+          guides (color = FALSE))
+  })
+  
+#---Plot one representative network for each model
+labs_b <- c ("V1","V2","V3","V4","V5","V6","V7","V8","V9","V10","V11")
+net_av_grid <- plot_grid(plotlist = plots_av, 
+          labels = labs_b,
+          label_size = 11,
+          label_fontfamily = 'Times',
+          nrow = 3,
+          align = 'hv',
+          axis = 'tblr')
+
+#---Add a title to the grid of plots
+title <- ggdraw() + 
+  draw_label(
+    "Average Exposure Model",
+    fontfamily = 'Times',
+    size = 12,
+    x = 0,
+    hjust = 0
+  ) +
+  theme(
+    # add margin on the left of the drawing canvas,
+    # so title is aligned with left edge of first plot
+    plot.margin = margin(0, 0, 0, 7)
+  )
+
+#----Final plot
+b <- plot_grid(
+  title, net_av_grid,
+  ncol = 1,
+  # rel_heights values control vertical title margins
+  rel_heights = c(0.1, 1)
+)
+
+b
+```
+
+```{r}
+plot_grid (a,b, ncol = 1,nrow = 2)
+```
+
+
+#################---MANIPULATIONS OF THE RATE FUNCTION---#####################
+
+Here I use the estimated models to make manipulations of the adoption rate function instead of the exposure effects and see how the diffusion process unfolds. 
+
+
+```{r}
+#########MANIPULATIONS 
+#########TOTAL EXPOSURE MODEL
+manip_totExprate <- results_sims$theta[6] * seq(0.1,5.1,0.20)
+manip_totExprate
+
+friend_rate <- 0.001
+#---Manipulated models for totExposure---#
+models_totExprate <- rep(list(results_sims),length(manip_totExprate))
+models_totExprate <- lapply(1:length(manip_totExprate),function(i){
+	m <- models_totExprate[[i]]
+	m$theta[[6]] <- manip_totExprate[i]
+	m$theta[[1]] <- friend_rate
+	m$theta[[7]] <- abs(m$theta[[7]])
+	return(m)
+})
+
+models_totExprate
+```
+
+```{r}
+ #######SIMULATIONS
+ #######TOTAL EXPOSURE MODEL
+N <- 100 #Number of simulated networks
+
+# simulate N networks under each condition:
+simulation_options <- sienaAlgorithmCreate(useStdInits=FALSE,
+	projname='results',cond=FALSE,seed=1234567,
+	nsub=0,n3=N)
+
+tic ("Simulations")
+calsims_tot_rate <- lapply(models_totExprate,function(m){
+	siena07(simulation_options,
+	data=data_sims,effects=model_sims,
+	prevAns=m,returnDeps=TRUE, useCluster = TRUE , nbrNodes = 4)
+})
+toc()
+
+```
+
+
+```{r}
+#########DIFUSSION IN THE SIMULATED NETWORKS
+#########TOTAL EXPOSURE MODEL
+
+#-----Number of ones on each simulated network with totSim
+gof_manipulated_tot <- lapply(calsims_tot_rate, function(x){
+  sienaGOF(x,BehaviorDistribution,
+	verbose=TRUE,join=TRUE,varName="adoption")
+}) 
+
+
+ones_manipulated_tot <- lapply (gof_manipulated_tot, function(x){
+  x$Joint$Simulations[,2] - x$Joint$Simulations[,1]
+})
+
+
+mean_ones_tot <- unlist (lapply (gof_manipulated_tot, function(x){mean (
+  x$Joint$Simulations[,2] - x$Joint$Simulations[,1])
+  
+}))
+
+mean_ones_tot
+
+##########VIOLIN PLOT
+########## TOTAL EXPOSURE MODEL 
+
+df_tot <- do.call(cbind, ones_manipulated_tot)
+
+df_tot%>% 
+  as_tibble ()%>% 
+  pivot_longer(cols = 1:ncol(df_tot),names_to = "Model", values_to = "Adopters") %>% 
+  mutate (Model = as_factor(Model))%>% 
+  ggplot (aes ( Model, Adopters)) +
+  geom_violin(aes(color = Model ),trim = TRUE,alpha = 0.5, show.legend = FALSE) +
+  geom_boxplot(aes (color = Model) , width = 0.2, show.legend = FALSE) 
+
+```
+
+
+```{r}
+#########AVERAGE EXPOSURE MODEL
+
+######### DEFINING THE MODEL
+model_sims_av <- setEffect(model_sims ,totExposure,interaction1="friendship",name="adoption",type = "rate", include = FALSE)
+model_sims_av <- includeEffects(model_sims_av, avExposure, interaction1 = "friendship", name = "adoption", type = "rate")
+
+model_sims_av
+
+########ESTIMATION 
+tic("estimation")
+results_sims_av <- siena07(estimation_options, data = data_sims, effects = model_sims_av, useCluster = TRUE , nbrNodes = 4, returnDeps = TRUE)
+toc()
+
+results_sims_av
+```
+
+
+
+```{r}
+#---MANIPULATIONS FOR THE AVERAGE EXPOSURE MODEL---#
+
+manip_avExprate <-  results_sims_av$theta[[6]] * seq(0.1,5.1,0.20)
+manip_avExprate
+
+friend_rate <- 0.001
+#---Manipulated models for avExposure---#
+models_avExprate <- rep(list(results_sims_av),length(manip_avExprate))
+models_avExprate <- lapply(1:length(manip_avExprate),function(i){
+	m <- models_avExprate[[i]]
+	m$theta[[7]] <- abs(m$theta [[7]])
+	m$theta[[6]] <- manip_avExprate [[i]]
+	m$theta[[1]] <- friend_rate
+	return(m)
+})
+
+models_avExprate
+```
+
+```{r}
+
+N <- 100 #Number of simulated networks
+
+# simulate N networks under each condition:
+simulation_options <- sienaAlgorithmCreate(useStdInits=FALSE,
+	projname='results',cond=FALSE,seed=1234567,
+	nsub=0,n3=N)
+
+
+tic("Simulations")
+calsims_avrate <- lapply(models_avExprate ,function(m){
+	siena07(simulation_options,
+	data=data_sims,effects=model_sims_av,
+	prevAns=m,returnDeps=TRUE, useCluster = TRUE , nbrNodes = 4)
+})
+toc ()
+
+```
+
+
+```{r}
+#-----Number of ones on each simulated network with totSim
+gof_manipulated_av <- lapply(calsims_avrate, function(x){
+  sienaGOF(x,BehaviorDistribution,
+	verbose=TRUE,join=TRUE,varName="adoption")
+}) 
+
+
+ones_manipulated_av <- lapply (gof_manipulated_av, function(x){
+  x$Joint$Simulations[,2] - x$Joint$Simulations[,1]
+})
+
+
+mean_ones_av <- unlist (lapply (gof_manipulated_av, function(x){mean (
+  x$Joint$Simulations[,2] - x$Joint$Simulations[,1])
+  
+}))
+
+mean_ones_av
+
+
+#----Violin Plot
+df_av <- do.call(cbind, ones_manipulated_av)
+
+df_av%>% 
+  as_tibble ()%>% 
+  pivot_longer(cols = 1:ncol(df_av),names_to = "Model", values_to = "Adopters") %>% 
+  mutate (Model = as_factor(Model))%>% 
+  ggplot (aes ( Model, Adopters)) +
+  geom_violin(aes(color = Model ),trim = TRUE,alpha = 0.5, show.legend = FALSE) +
+  geom_boxplot(aes (color = Model) , width = 0.2, show.legend = FALSE) 
+```
+
+
+```{r}
+###---MODEL COMPARISON---###
+
+mean_adoption <- t(rbind (mean_ones_av ,mean_ones_tot)) %>% 
+  as_tibble () %>% 
+  pivot_longer (cols = 1:2, names_to = "Effect",values_to = "Mean Adoption")
+
+
+df_both <- 
+  bind_rows(tot = as_tibble(df_tot) , av = as_tibble(df_av), .id = "Effect") %>%
+  as_tibble() 
+
+df_both %>% 
+  pivot_longer(cols = 2:length(df_both) ,names_to = "Model", values_to = "Adopters") %>% 
+  mutate (Model = as_factor(Model)) %>% 
+
+  ggplot (aes (Model, Adopters, fil = Effect)) +
+  geom_violin(aes(color = Effect),position = position_dodge(0.8),trim = TRUE,alpha = 0.5, show.legend = FALSE) +
+  geom_boxplot(aes (color = Effect) ,position = position_dodge(0.8), width = 0.2, show.legend = TRUE)+
+  stat_summary(fun.y=mean, geom="line", aes(group=Effect, color =Effect)) +
+  labs (title = "Figure 2. Simulated diffusion process on the Glasgow network",
+       x = "Adoption rate function",
+       y = "Number of adopters") +
+  theme (text = element_text (family = 'Times'))
+  
+ 
+```
+
+
